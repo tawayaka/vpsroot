@@ -1,79 +1,120 @@
-FROM ubuntu:20.04 as ubuntu-base
+FROM ghcr.io/linuxserver/baseimage-alpine-nginx:3.14
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    DEBCONF_NONINTERACTIVE_SEEN=true
+# set version label
+ARG BUILD_DATE
+ARG VERSION
+ARG NEXTCLOUD_RELEASE
+LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
+LABEL maintainer="aptalca"
 
-RUN apt-get -qqy update \
-    && apt-get -qqy --no-install-recommends install \
-        sudo \
-        supervisor \
-        xvfb x11vnc novnc websockify \
-    && apt-get autoclean \
-    && apt-get autoremove \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# environment settings
+ENV NEXTCLOUD_PATH="/config/www/nextcloud" \
+  LD_PRELOAD="/usr/lib/preloadable_libiconv.so"
 
-RUN cp /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+RUN \
+  echo "**** install build packages ****" && \
+  apk add --no-cache --virtual=build-dependencies --upgrade \
+    autoconf \
+    automake \
+    file \
+    g++ \
+    gcc \
+    make \
+    php7-dev \
+    re2c \
+    samba-dev \
+    zlib-dev && \
+  echo "**** install runtime packages ****" && \
+  apk add --no-cache --upgrade \
+    curl \
+    ffmpeg \
+    gnu-libiconv \
+    imagemagick \
+    libxml2 \
+    php7-apcu \
+    php7-bcmath \
+    php7-bz2 \
+    php7-ctype \
+    php7-curl \
+    php7-dom \
+    php7-exif \
+    php7-fileinfo \
+    php7-ftp \
+    php7-gd \
+    php7-gmp \
+    php7-iconv \
+    php7-imagick \
+    php7-imap \
+    php7-intl \
+    php7-ldap \
+    php7-mcrypt \
+    php7-memcached \
+    php7-opcache \
+    php7-pcntl \
+    php7-pdo_mysql \
+    php7-pdo_pgsql \
+    php7-pdo_sqlite \
+    php7-pgsql \
+    php7-phar \
+    php7-posix \
+    php7-redis \
+    php7-sodium \
+    php7-sqlite3 \
+    php7-xmlreader \
+    php7-zip \
+    samba-client \
+    sudo \
+    tar \
+    unzip && \
+  echo "**** compile smbclient ****" && \
+  git clone https://github.com/eduardok/libsmbclient-php.git /tmp/smbclient && \
+  cd /tmp/smbclient && \
+  phpize7 && \
+  ./configure \
+    --with-php-config=/usr/bin/php-config7 && \
+  make && \
+  make install && \
+  echo "**** configure php and nginx for nextcloud ****" && \
+  echo "extension="smbclient.so"" > /etc/php7/conf.d/00_smbclient.ini && \
+  echo 'apc.enable_cli=1' >> /etc/php7/conf.d/apcu.ini && \
+  sed -i \
+    -e 's/;opcache.enable.*=.*/opcache.enable=1/g' \
+    -e 's/;opcache.interned_strings_buffer.*=.*/opcache.interned_strings_buffer=16/g' \
+    -e 's/;opcache.max_accelerated_files.*=.*/opcache.max_accelerated_files=10000/g' \
+    -e 's/;opcache.memory_consumption.*=.*/opcache.memory_consumption=128/g' \
+    -e 's/;opcache.save_comments.*=.*/opcache.save_comments=1/g' \
+    -e 's/;opcache.revalidate_freq.*=.*/opcache.revalidate_freq=1/g' \
+    -e 's/;always_populate_raw_post_data.*=.*/always_populate_raw_post_data=-1/g' \
+    -e 's/memory_limit.*=.*128M/memory_limit=512M/g' \
+    -e 's/max_execution_time.*=.*30/max_execution_time=120/g' \
+    -e 's/upload_max_filesize.*=.*2M/upload_max_filesize=1024M/g' \
+    -e 's/post_max_size.*=.*8M/post_max_size=1024M/g' \
+      /etc/php7/php.ini && \
+  sed -i \
+    '/opcache.enable=1/a opcache.enable_cli=1' \
+      /etc/php7/php.ini && \
+  echo "env[PATH] = /usr/local/bin:/usr/bin:/bin" >> /etc/php7/php-fpm.conf && \
+  echo "**** set version tag ****" && \
+  if [ -z ${NEXTCLOUD_RELEASE+x} ]; then \
+    NEXTCLOUD_RELEASE=$(curl -sX GET https://api.github.com/repos/nextcloud/server/releases/latest \
+      | awk '/tag_name/{print $4;exit}' FS='[""]' \
+      | sed 's|^v||'); \
+  fi && \
+  echo "**** download nextcloud ****" && \
+  curl -o /app/nextcloud.tar.bz2 -L \
+    https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_RELEASE}.tar.bz2 && \
+  echo "**** test tarball ****" && \
+    tar xvf /app/nextcloud.tar.bz2 -C \
+      /tmp && \
+  echo "**** cleanup ****" && \
+  apk del --purge \
+    build-dependencies && \
+  rm -rf \
+    /tmp/*
 
-COPY scripts/* /opt/bin/
+# copy local files
+COPY root/ /
 
-# Add Supervisor configuration file
-COPY supervisord.conf /etc/supervisor/
-
-# Relaxing permissions for other non-sudo environments
-RUN  mkdir -p /var/run/supervisor /var/log/supervisor \
-    && chmod -R 777 /opt/bin/ /var/run/supervisor /var/log/supervisor /etc/passwd \
-    && chgrp -R 0 /opt/bin/ /var/run/supervisor /var/log/supervisor \
-    && chmod -R g=u /opt/bin/ /var/run/supervisor /var/log/supervisor
-
-# Creating base directory for Xvfb
-RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-
-CMD ["/opt/bin/entry_point.sh"]
-
-#============================
-# Utilities
-#============================
-FROM ubuntu-base as ubuntu-utilities
-
-RUN apt-get -qqy update \
-    && apt-get -qqy --no-install-recommends install \
-        firefox htop terminator gnupg2 software-properties-common \
-    && wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt install -qqy --no-install-recommends ./google-chrome-stable_current_amd64.deb \
-    && apt-add-repository ppa:remmina-ppa-team/remmina-next \
-    && apt update \
-    && apt install -qqy --no-install-recommends remmina remmina-plugin-rdp remmina-plugin-secret \
-    && apt-add-repository ppa:obsproject/obs-studio \
-    && apt update \
-    && apt install -qqy --no-install-recommends obs-studio \
-    && apt install unzip \
-    && apt-get autoclean \
-    && apt-get autoremove \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-
-# COPY conf.d/* /etc/supervisor/conf.d/
-
-
-#============================
-# GUI
-#============================
-FROM ubuntu-utilities as ubuntu-ui
-
-ENV SCREEN_WIDTH=1280 \
-    SCREEN_HEIGHT=720 \
-    SCREEN_DEPTH=24 \
-    SCREEN_DPI=96 \
-    DISPLAY=:99 \
-    DISPLAY_NUM=99 \
-    UI_COMMAND=/usr/bin/startxfce4
-
-# RUN apt-get update -qqy \
-#     && apt-get -qqy install \
-#         xserver-xorg xserver-xorg-video-fbdev xinit pciutils xinput xfonts-100dpi xfonts-75dpi xfonts-scalable kde-plasma-desktop
-
-RUN apt-get update -qqy \
-    && apt-get -qqy install --no-install-recommends \
-        dbus-x11 xfce4 \
-    && apt-get autoclean \
-    && apt-get autoremove \
-    && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+# ports and volumes
+EXPOSE 443
+VOLUME /config /data
