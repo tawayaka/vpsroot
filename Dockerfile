@@ -1,120 +1,118 @@
-FROM ghcr.io/linuxserver/baseimage-alpine-nginx:3.14
+ARG NEXTCLOUD_VERSION=24.0.2
+ARG SMBCLIENT_VERSION=1.0.6
 
-# set version label
-ARG BUILD_DATE
-ARG VERSION
-ARG NEXTCLOUD_RELEASE
-LABEL build_version="Linuxserver.io version:- ${VERSION} Build-date:- ${BUILD_DATE}"
-LABEL maintainer="aptalca"
+FROM crazymax/yasu:latest AS yasu
+FROM --platform=${BUILDPLATFORM:-linux/amd64} crazymax/alpine-s6:3.15-2.2.0.3 AS download
+RUN apk --update --no-cache add curl gnupg tar unzip xz
 
-# environment settings
-ENV NEXTCLOUD_PATH="/config/www/nextcloud" \
-  LD_PRELOAD="/usr/lib/preloadable_libiconv.so"
+ARG NEXTCLOUD_VERSION
+WORKDIR /tmp
+RUN curl -SsOL "https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2" \
+  && curl -SsOL "https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.asc" \
+  && curl -SsOL "https://nextcloud.com/nextcloud.asc"
+RUN gpg --import "nextcloud.asc" \
+  && gpg --verify --batch --no-tty "nextcloud-${NEXTCLOUD_VERSION}.tar.bz2.asc" "nextcloud-${NEXTCLOUD_VERSION}.tar.bz2"
+WORKDIR /dist/nextcloud
+RUN tar -xjf "/tmp/nextcloud-${NEXTCLOUD_VERSION}.tar.bz2" --strip 1 -C .
 
-RUN \
-  echo "**** install build packages ****" && \
-  apk add --no-cache --virtual=build-dependencies --upgrade \
-    autoconf \
-    automake \
-    file \
-    g++ \
-    gcc \
-    make \
-    php7-dev \
-    re2c \
-    samba-dev \
-    zlib-dev && \
-  echo "**** install runtime packages ****" && \
-  apk add --no-cache --upgrade \
+FROM crazymax/alpine-s6:3.15-2.2.0.3
+
+ARG SMBCLIENT_VERSION
+RUN apk --update --no-cache add \
+    bash \
+    ca-certificates \
     curl \
     ffmpeg \
-    gnu-libiconv \
     imagemagick \
+    ghostscript \
+    libsmbclient \
     libxml2 \
-    php7-apcu \
-    php7-bcmath \
-    php7-bz2 \
-    php7-ctype \
-    php7-curl \
-    php7-dom \
-    php7-exif \
-    php7-fileinfo \
-    php7-ftp \
-    php7-gd \
-    php7-gmp \
-    php7-iconv \
-    php7-imagick \
-    php7-imap \
-    php7-intl \
-    php7-ldap \
-    php7-mcrypt \
-    php7-memcached \
-    php7-opcache \
-    php7-pcntl \
-    php7-pdo_mysql \
-    php7-pdo_pgsql \
-    php7-pdo_sqlite \
-    php7-pgsql \
-    php7-phar \
-    php7-posix \
-    php7-redis \
-    php7-sodium \
-    php7-sqlite3 \
-    php7-xmlreader \
-    php7-zip \
-    samba-client \
-    sudo \
+    nginx \
+    openssl \
+    php8 \
+    php8-bcmath \
+    php8-bz2 \
+    php8-cli \
+    php8-ctype \
+    php8-curl \
+    php8-dom \
+    php8-exif \
+    php8-fileinfo \
+    php8-fpm \
+    php8-ftp \
+    php8-gd \
+    php8-gmp \
+    php8-iconv \
+    php8-intl \
+    php8-json \
+    php8-ldap \
+    php8-mbstring \
+    php8-opcache \
+    php8-openssl \
+    php8-pcntl \
+    php8-pecl-apcu \
+    php8-pecl-imagick \
+    php8-pecl-mcrypt \
+    php8-pecl-memcached \
+    php8-pdo \
+    php8-pdo_mysql \
+    php8-pdo_pgsql \
+    php8-pdo_sqlite \
+    php8-posix \
+    php8-redis \
+    php8-session \
+    php8-simplexml \
+    php8-sqlite3 \
+    php8-xml \
+    php8-xmlreader \
+    php8-xmlwriter \
+    php8-zip \
+    php8-zlib \
+    python3 \
+    py3-pip \
+    tzdata \
+  && mv /etc/php8 /etc/php && ln -s /etc/php /etc/php8 \
+  && mv /etc/init.d/php-fpm8 /etc/init.d/php-fpm && ln -s /etc/init.d/php-fpm /etc/init.d/php-fpm8 \
+  && mv /etc/logrotate.d/php-fpm8 /etc/logrotate.d/php-fpm && ln -s /etc/logrotate.d/php-fpm /etc/logrotate.d/php-fpm8 \
+  && mv /var/log/php8 /var/log/php && ln -s /var/log/php /var/log/php8 \
+  && ln -s /usr/bin/php8 /usr/bin/php \
+  && ln -s /usr/sbin/php-fpm8 /usr/sbin/php-fpm \
+  && apk --update --no-cache add -t build-dependencies \
+    autoconf \
+    automake \
+    build-base \
+    libtool \
+    pcre-dev \
+    php8-dev \
+    php8-pear \
+    samba-dev \
     tar \
-    unzip && \
-  echo "**** compile smbclient ****" && \
-  git clone https://github.com/eduardok/libsmbclient-php.git /tmp/smbclient && \
-  cd /tmp/smbclient && \
-  phpize7 && \
-  ./configure \
-    --with-php-config=/usr/bin/php-config7 && \
-  make && \
-  make install && \
-  echo "**** configure php and nginx for nextcloud ****" && \
-  echo "extension="smbclient.so"" > /etc/php7/conf.d/00_smbclient.ini && \
-  echo 'apc.enable_cli=1' >> /etc/php7/conf.d/apcu.ini && \
-  sed -i \
-    -e 's/;opcache.enable.*=.*/opcache.enable=1/g' \
-    -e 's/;opcache.interned_strings_buffer.*=.*/opcache.interned_strings_buffer=16/g' \
-    -e 's/;opcache.max_accelerated_files.*=.*/opcache.max_accelerated_files=10000/g' \
-    -e 's/;opcache.memory_consumption.*=.*/opcache.memory_consumption=128/g' \
-    -e 's/;opcache.save_comments.*=.*/opcache.save_comments=1/g' \
-    -e 's/;opcache.revalidate_freq.*=.*/opcache.revalidate_freq=1/g' \
-    -e 's/;always_populate_raw_post_data.*=.*/always_populate_raw_post_data=-1/g' \
-    -e 's/memory_limit.*=.*128M/memory_limit=512M/g' \
-    -e 's/max_execution_time.*=.*30/max_execution_time=120/g' \
-    -e 's/upload_max_filesize.*=.*2M/upload_max_filesize=1024M/g' \
-    -e 's/post_max_size.*=.*8M/post_max_size=1024M/g' \
-      /etc/php7/php.ini && \
-  sed -i \
-    '/opcache.enable=1/a opcache.enable_cli=1' \
-      /etc/php7/php.ini && \
-  echo "env[PATH] = /usr/local/bin:/usr/bin:/bin" >> /etc/php7/php-fpm.conf && \
-  echo "**** set version tag ****" && \
-  if [ -z ${NEXTCLOUD_RELEASE+x} ]; then \
-    NEXTCLOUD_RELEASE=$(curl -sX GET https://api.github.com/repos/nextcloud/server/releases/latest \
-      | awk '/tag_name/{print $4;exit}' FS='[""]' \
-      | sed 's|^v||'); \
-  fi && \
-  echo "**** download nextcloud ****" && \
-  curl -o /app/nextcloud.tar.bz2 -L \
-    https://download.nextcloud.com/server/releases/nextcloud-${NEXTCLOUD_RELEASE}.tar.bz2 && \
-  echo "**** test tarball ****" && \
-    tar xvf /app/nextcloud.tar.bz2 -C \
-      /tmp && \
-  echo "**** cleanup ****" && \
-  apk del --purge \
-    build-dependencies && \
-  rm -rf \
-    /tmp/*
+    wget \
+  && pip3 install --upgrade pip \
+  && pip3 install nextcloud_news_updater \
+  && cd /tmp \
+  && wget -q https://pecl.php.net/get/smbclient-${SMBCLIENT_VERSION}.tgz \
+  && pecl8 install smbclient-${SMBCLIENT_VERSION}.tgz \
+  && apk del build-dependencies \
+  && rm -rf /tmp/* /var/www/*
 
-# copy local files
-COPY root/ /
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS="2" \
+  TZ="UTC" \
+  PUID="1000" \
+  PGID="1000"
 
-# ports and volumes
-EXPOSE 443
-VOLUME /config /data
+COPY --from=yasu / /
+COPY --from=download --chown=nobody:nogroup /dist/nextcloud /var/www
+COPY rootfs /
+
+RUN addgroup -g ${PGID} nextcloud \
+  && adduser -D -h /home/nextcloud -u ${PUID} -G nextcloud -s /bin/sh nextcloud
+
+EXPOSE 8080
+WORKDIR /var/www
+VOLUME [ "/data" ]
+
+ENTRYPOINT [ "/init" ]
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s \
+  CMD /usr/local/bin/healthcheck
